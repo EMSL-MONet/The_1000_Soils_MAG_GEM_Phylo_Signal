@@ -1,13 +1,13 @@
 # ============================================================
 # config.R
 #
-# Input/output paths and analysis parameters shared by every script.
-# All paths are relative to the repository root; run scripts
-# from that folder (see README.md).
+# Input/output paths and analysis parameters used by analysis.Rmd.
+# All paths are relative to the repository root; render
+# analysis.Rmd from that folder (see README.md).
 # ============================================================
 
 if (!file.exists(file.path("R", "config.R"))) {
-  stop("Run the scripts from the repository root (setwd() to it first).")
+  stop("Render analysis.Rmd from the repository root (setwd() to it first).")
 }
 
 # ---- Inputs (data/) ----
@@ -21,7 +21,9 @@ INPUT <- list(
   tree_bacteria = file.path("data", "bac120.contree"),
   tree_archaea  = file.path("data", "ar53.contree"),
   # CheckM2 quality report for the 551 dereplicated MAGs
-  checkm2 = file.path("data", "checkm2_551_MAGs.tsv")
+  checkm2 = file.path("data", "checkm2_551_MAGs.tsv"),
+  # Supplementary Table 2 as published, used to check the reproduction
+  published_supp_table_2 = file.path("data", "published_supplementary_table_2.tsv")
 )
 
 # ---- Outputs (results/) ----
@@ -36,7 +38,10 @@ OUTPUT <- list(
   mantel_archaea        = file.path(OUT_DIR, "mantel_archaea.tsv"),
   supp_table_2          = file.path(OUT_DIR, "Supplementary_Table_2_bacteria_mantel_r_Padj.tsv"),
   tip_metadata_bacteria = file.path(OUT_DIR, "tip_metadata_bacteria.tsv"),
-  gc_test               = file.path(OUT_DIR, "gc_content_exchange_pattern_test.tsv")
+  gc_test               = file.path(OUT_DIR, "gc_content_exchange_pattern_test.tsv"),
+  figure_1              = file.path(FIG_DIR, "Figure_1_bacteria_tree_with_rings.pdf"),
+  figure_2              = file.path(FIG_DIR, "Figure_2_mantel_scatter_significant.pdf"),
+  supp_figure_1         = file.path(FIG_DIR, "Supplementary_Figure_1_mantel_scatter_other.pdf")
 )
 
 # ---- Parameters ----

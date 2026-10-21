@@ -1,0 +1,270 @@
+---
+title: "Phylogenetic signal in predicted metabolite exchange of soil MAGs"
+subtitle: "Reproducing the published results and exploring the GEM/FBA data"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+params:
+  example_mag: "BLAN-BTM_bin.1.o"
+  example_compound: "Pyruvate"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center")
+source(file.path("R", "config.R"))
+source(file.path("R", "utils.R"))
+source(file.path("R", "analysis.R"))
+source(file.path("R", "explore.R"))
+```
+
+This notebook accompanies [manuscript citation]. It uses the genome-scale
+metabolic models (GEMs) and flux balance analysis (FBA) predictions for 550
+soil metagenome-assembled genomes (MAGs) to
+
+1. **reproduce every result reported in the manuscript**: the Mantel tests of
+   phylogenetic signal, Figure 1, Figure 2, Supplementary Figure 1,
+   Supplementary Table 2, and the statistics quoted in the main text; and
+2. **explore the data**: what an individual MAG takes up and secretes, and how
+   a metabolite's exchange varies across phyla.
+
+**How to run.** Open this file from the repository root and click *Knit* in
+RStudio, or run `rmarkdown::render("analysis.Rmd")`. The first run takes about
+30 minutes, almost all of it the bacterial Mantel tests; their results are then
+cached, so later runs take a few minutes. All outputs are written to
+`results/`. To explore a different MAG or metabolite in Part 2, change
+`example_mag` and `example_compound` in the header, or render with, e.g.,
+`rmarkdown::render("analysis.Rmd", params = list(example_compound = "Ethanol"))`.
+
+**Inputs** (in `data/`): compiled KBase FBA exchange fluxes for the bacterial
+and archaeal MAGs, IQ-TREE consensus trees (`bac120`, `ar53`), and the CheckM2
+quality report. Per-MAG model and FBA files and the MAG sequences are available
+on Zenodo (https://doi.org/10.5281/zenodo.23480528).
+
+# Reproducing the published results
+
+## Filtering the FBA tables
+
+MAGs without FBA output are removed (PPRH-TOP_bin.5.o, whose draft model could
+not be gapfilled to produce biomass). Compounds missing from one-third or more
+of the MAGs are dropped, and remaining missing values are set to zero (no
+exchange).
+
+```{r filter}
+bac_fba <- filter_fba_table(INPUT$fba_bacteria, OUTPUT$fba_filtered_bacteria)
+arc_fba <- filter_fba_table(INPUT$fba_archaea,  OUTPUT$fba_filtered_archaea)
+
+filter_summary <- dplyr::bind_rows(lapply(
+  list(Bacteria = bac_fba, Archaea = arc_fba), function(x) {
+    s <- attr(x, "summary")
+    tibble::tibble(MAGs = s$n_mags, `compounds in` = s$n_compounds_in,
+                   `compounds kept` = s$n_compounds_kept,
+                   `MAGs dropped` = paste(c(s$mags_dropped, "none")[1], collapse = ", "))
+  }), .id = "domain")
+knitr::kable(filter_summary)
+```
+
+## Phylogenetic signal (Mantel tests)
+
+For each compound, a Spearman Mantel test (999 permutations, seed 1) compares
+pairwise patristic distance with pairwise difference in normalized flux.
+P-values are Benjamini–Hochberg-adjusted within each domain. This chunk is
+cached and reruns only if the inputs or analysis code change.
+
+```{r mantel, cache = TRUE, cache.extra = tools::md5sum(c(INPUT$fba_bacteria, INPUT$fba_archaea, INPUT$tree_bacteria, INPUT$tree_archaea, "R/config.R", "R/utils.R", "R/analysis.R"))}
+bac_mantel <- mantel_phylo_signal(INPUT$tree_bacteria, bac_fba, OUTPUT$mantel_bacteria)
+arc_mantel <- mantel_phylo_signal(INPUT$tree_archaea,  arc_fba, OUTPUT$mantel_archaea)
+```
+
+```{r mantel-summary}
+bac_tested <- dplyr::filter(bac_mantel, !is.na(mantel_r))
+arc_tested <- dplyr::filter(arc_mantel, !is.na(mantel_r))
+bac_sig    <- dplyr::filter(bac_tested, p_adj < PARAMS$padj_cutoff)
+
+tibble::tibble(
+  domain = c("Bacteria", "Archaea"),
+  `compounds tested` = c(nrow(bac_tested), nrow(arc_tested)),
+  `median r` = round(c(median(bac_tested$mantel_r), median(arc_tested$mantel_r)), 3),
+  `minimum P_adj` = round(c(min(bac_tested$p_adj), min(arc_tested$p_adj)), 3),
+  `significant (P_adj < 0.05)` = c(nrow(bac_sig), sum(arc_tested$p_adj < PARAMS$padj_cutoff))
+) |> knitr::kable()
+```
+
+## Supplementary Table 2
+
+```{r supp-table-2}
+supp_table_2 <- supplementary_table_2(bac_mantel, OUTPUT$supp_table_2)
+knitr::kable(supp_table_2)
+```
+
+## Figure 1
+
+The bacterial tree with rings for GC content, genome size, and the
+`r nrow(bac_sig)` metabolites with significant phylogenetic signal, ordered by
+Mantel r. This is the raw ggtree output; the published figure was finished in
+Adobe Illustrator (legend layout, ring numbering) with the same data, colors,
+and order.
+
+```{r figure-1}
+tip_metadata <- build_tip_metadata(INPUT$tree_bacteria, INPUT$fba_bacteria)
+readr::write_tsv(tip_metadata, OUTPUT$tip_metadata_bacteria)
+
+fig1 <- plot_tree_with_rings(INPUT$tree_bacteria, tip_metadata, bac_fba, bac_sig$compound_id)
+ggsave(OUTPUT$figure_1, fig1, width = 28, height = 28, limitsize = FALSE)
+fig1_png <- sub("\\.pdf$", ".png", OUTPUT$figure_1)
+ggsave(fig1_png, fig1, width = 28, height = 28, dpi = 100, limitsize = FALSE)
+knitr::include_graphics(fig1_png)
+```
+
+## Figure 2 and Supplementary Figure 1
+
+Patristic distance versus difference in normalized flux for every pair of
+bacterial MAGs. Figure 2 shows the metabolites with P_adj < 0.05; Supplementary
+Figure 1 shows the remaining tested metabolites.
+
+```{r figure-2, fig.width = 12, fig.height = 6.5}
+other_ids <- bac_tested$compound_id[bac_tested$p_adj >= PARAMS$padj_cutoff]
+
+fig2 <- plot_mantel_scatter(INPUT$tree_bacteria, bac_fba, bac_mantel, bac_sig$compound_id, ncol = 4)
+ggsave(OUTPUT$figure_2, fig2, width = 12, height = 3.2 * ceiling(nrow(bac_sig) / 4))
+fig2
+```
+
+```{r supp-figure-1, fig.width = 22, fig.height = 13}
+sfig1 <- plot_mantel_scatter(INPUT$tree_bacteria, bac_fba, bac_mantel, other_ids, ncol = 8)
+ggsave(OUTPUT$supp_figure_1, sfig1, width = 22, height = 2.8 * ceiling(length(other_ids) / 8))
+sfig1
+```
+
+## Statistics reported in the main text
+
+Exchange patterns among the significant metabolites, and the GC-content
+comparison (two-sided Wilcoxon rank-sum / Mann–Whitney U test).
+
+```{r text-statistics}
+pat <- exchange_patterns(bac_fba)
+n_bac <- length(pat$bcaa_import)
+
+bcaa_by_phylum    <- pattern_by_phylum(pat$bcaa_import, pat$phylum)
+pyr_eth_by_phylum <- pattern_by_phylum(pat$pyr_eth_secretion, pat$phylum)
+gc <- gc_content_test(pat$combined, pat$phylum, OUTPUT$gc_test)
+
+knitr::kable(head(bcaa_by_phylum, 4), digits = 2,
+             caption = "Highest fraction of MAGs importing L-leucine and/or L-isoleucine (phyla with >= 10 MAGs)")
+knitr::kable(head(pyr_eth_by_phylum, 4), digits = 2,
+             caption = "Highest fraction of MAGs secreting both pyruvate and ethanol (phyla with >= 10 MAGs)")
+knitr::kable(gc$test, digits = 3, caption = "GC content of MAGs combining both patterns vs. all others")
+knitr::kable(gc$by_phylum, digits = 3, caption = "MAGs combining both patterns, by phylum")
+```
+
+## Check against the manuscript
+
+Every number above is compared with the value reported in the manuscript.
+Percentages and medians are rounded half up, as in the text.
+
+```{r check}
+round_half_up <- function(x, digits = 0) floor(x * 10^digits + 0.5) / 10^digits
+pct <- function(x) paste0(round_half_up(100 * mean(x)), "%")
+frac <- function(tbl, p) with(dplyr::filter(tbl, phylum == p), paste0(n_pattern, "/", n_mags))
+gc_med <- function(p) paste0(round_half_up(100 * gc$by_phylum$gc_median[gc$by_phylum$phylum == p]), "%")
+
+checks <- tibble::tribble(
+  ~statistic,                                         ~reproduced,                                                    ~manuscript,
+  "Bacterial MAGs with GEMs",                          as.character(n_bac),                                            "497",
+  "Archaeal MAGs with GEMs",                           as.character(attr(arc_fba, "summary")$n_mags),                  "53",
+  "Bacterial compounds kept / total",                  paste0(nrow(bac_fba), "/", attr(bac_fba, "summary")$n_compounds_in), "50/254",
+  "Archaeal compounds kept / total",                   paste0(nrow(arc_fba), "/", attr(arc_fba, "summary")$n_compounds_in), "67/141",
+  "Bacterial metabolites tested",                      as.character(nrow(bac_tested)),                                 "44",
+  "Archaeal metabolites tested",                       as.character(nrow(arc_tested)),                                 "58",
+  "Median bacterial Mantel r",                         sprintf("%.3f", median(bac_tested$mantel_r)),                   "0.029",
+  "Minimum archaeal P_adj",                            sprintf("%.3f", min(arc_tested$p_adj)),                         "0.861",
+  "Significant bacterial metabolites",                 paste(clean_compound_name(bac_sig$name), collapse = ", "),
+                                                       "L-Methionine, Pyruvate, L-Leucine, Acetaldehyde, Ethanol, L-Isoleucine, NH3, CO2",
+  "BCAA import (MAGs)",                                paste0(sum(pat$bcaa_import), "/", n_bac, " (", pct(pat$bcaa_import), ")"), "348/497 (70%)",
+  "MAGs secreting L-leucine or L-isoleucine",          as.character(sum(pat$bcaa_secretion)),                          "0",
+  "BCAA import: Verrucomicrobiota",                    frac(bcaa_by_phylum, "Verrucomicrobiota"),                      "40/42",
+  "BCAA import: Desulfobacterota_B",                   frac(bcaa_by_phylum, "Desulfobacterota_B"),                     "11/15",
+  "BCAA import: Chloroflexota",                        frac(bcaa_by_phylum, "Chloroflexota"),                          "27/38",
+  "BCAA import: Actinomycetota",                       frac(bcaa_by_phylum, "Actinomycetota"),                         "90/128",
+  "Pyruvate + ethanol secretion (MAGs)",               paste0(sum(pat$pyr_eth_secretion), " (", pct(pat$pyr_eth_secretion), ")"), "66 (13%)",
+  "Pyruvate + ethanol: Verrucomicrobiota",             frac(pyr_eth_by_phylum, "Verrucomicrobiota"),                   "12/42",
+  "Pyruvate + ethanol: Gemmatimonadota",               frac(pyr_eth_by_phylum, "Gemmatimonadota"),                     "5/17",
+  "Pyruvate + ethanol: Acidobacteriota",               frac(pyr_eth_by_phylum, "Acidobacteriota"),                     "14/69",
+  "Pyruvate + ethanol: Actinomycetota",                frac(pyr_eth_by_phylum, "Actinomycetota"),                      "21/128",
+  "Acetaldehyde uptake",                               pct(pat$acetaldehyde_uptake),                                   "90%",
+  "MAGs combining both patterns",                      as.character(sum(pat$combined)),                                "36",
+  "Phyla among MAGs combining both patterns",          as.character(nrow(gc$by_phylum)),                               "8",
+  "GC range of MAGs combining both patterns",          paste0(round_half_up(100 * gc$test$gc_min_pattern), "-", round_half_up(100 * gc$test$gc_max_pattern), "%"), "54-73%",
+  "GC median: Verrucomicrobiota",                      gc_med("Verrucomicrobiota"),                                    "56%",
+  "GC median: Actinomycetota",                         gc_med("Actinomycetota"),                                       "67%",
+  "Mann-Whitney U P",                                  sprintf("%.2f", gc$test$p_value),                               "0.33",
+  "Figure 2 panels",                                   as.character(nrow(bac_sig)),                                    "8",
+  "Supplementary Figure 1 panels",                     as.character(length(other_ids)),                                "36"
+) |> dplyr::mutate(match = reproduced == manuscript)
+
+# Supplementary Table 2 vs. the published table, compound by compound
+published <- readr::read_tsv(INPUT$published_supp_table_2, col_types = "ccc")
+st2 <- dplyr::full_join(supp_table_2, published, by = c("compound" = "compound"),
+                        suffix = c("_reproduced", "_published"))
+st2_match <- with(st2, sum(r_reproduced == r_published & Padj_reproduced == Padj_published, na.rm = TRUE))
+checks <- dplyr::bind_rows(checks, tibble::tibble(
+  statistic = "Supplementary Table 2 rows identical (r and P_adj)",
+  reproduced = paste0(st2_match, "/", nrow(st2)), manuscript = paste0(nrow(published), "/", nrow(published)),
+  match = st2_match == nrow(published) && nrow(st2) == nrow(published)))
+
+knitr::kable(checks)
+```
+
+```{r check-result, echo = FALSE, results = "asis"}
+if (all(checks$match)) {
+  cat("**All", nrow(checks), "checks match the manuscript.**\n")
+} else {
+  cat("**", sum(!checks$match), "of", nrow(checks), "checks do not match the manuscript:**",
+      paste(checks$statistic[!checks$match], collapse = "; "), "\n")
+}
+```
+
+# Exploring the GEM/FBA data
+
+The filtered bacterial fluxes in long form: one row per MAG and compound
+(mmol gDW⁻¹ h⁻¹; positive = uptake, negative = secretion).
+
+```{r long}
+long <- fba_long(bac_fba)
+cat(dplyr::n_distinct(long$mag), "bacterial MAGs x", dplyr::n_distinct(long$compound), "compounds\n")
+head(long)
+```
+
+## What does one MAG take up and secrete?
+
+Compounds exchanged by `r params$example_mag`, largest fluxes first.
+
+```{r mag-profile}
+mag_exchange_profile(long, params$example_mag) |> knitr::kable(digits = 2)
+```
+
+## How does one metabolite vary across phyla?
+
+Predicted exchange of `r params$example_compound` across bacterial phyla
+(phyla with fewer than 10 MAGs pooled as "Other").
+
+```{r metabolite-by-phylum, fig.width = 8, fig.height = 5}
+by_phylum <- metabolite_by_phylum(long, params$example_compound)
+knitr::kable(by_phylum, digits = 2)
+plot_metabolite_by_phylum(by_phylum, params$example_compound)
+```
+
+Available compound names:
+
+```{r compound-list}
+sort(unique(long$compound))
+```
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```
